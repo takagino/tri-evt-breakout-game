@@ -3,7 +3,7 @@ import Matter from 'matter-js';
 import './index.css';
 
 // --- ゲーム設定定数 ---
-const BALL_SPEED = 8;
+const BALL_SPEED = 6;
 const PADDLE_THICKNESS = 30;
 const RESPAWN_TIME = 5000;
 const AUTO_START_DELAY = 3000; // ★オートスタートまでの時間（3000ms = 3秒）
