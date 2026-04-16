@@ -3,12 +3,12 @@ import Matter from 'matter-js';
 import './index.css';
 
 // --- ゲーム設定定数 ---
-const BALL_SPEED = 7;
+const BALL_SPEED = 8;
 const PADDLE_THICKNESS = 30;
 const RESPAWN_TIME = 5000;
 const AUTO_START_DELAY = 3000;
 
-// 線分と点の距離を測る数学関数（アイテムとバーの当たり判定用）
+// ★追加：線分と点の距離を測る数学関数（アイテムとバーの当たり判定用）
 const dist2 = (v, w) => (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
 const distToSegmentSquared = (p, v, w) => {
   const l2 = dist2(v, w);
@@ -35,6 +35,7 @@ export default function App() {
   const setupCanvasRef = useRef(null);
   const bgCanvasRef = useRef(null);
   const gameCanvasRef = useRef(null);
+  const setupViewRef = useRef(null);
   const distanceTextRef = useRef(null);
 
   const isAIReadyRef = useRef(false);
@@ -45,6 +46,7 @@ export default function App() {
   const engineRef = useRef(null);
   const renderLoopIdRef = useRef(null);
   const handsRef = useRef(null);
+  const cameraRef = useRef(null);
 
   const gameData = useRef({
     playerA: { x: 0, y: 0 },
@@ -59,6 +61,7 @@ export default function App() {
     respawnQueue: [],
     gameState: 'playing',
     isNewRecord: false,
+    // ★追加：アイテム管理用データ
     items: [],
     isSlowMode: false,
     slowTimer: 0,
@@ -94,7 +97,7 @@ export default function App() {
   }, [resizeCanvases, currentMode]);
 
   // ==========================================
-  // AI (MediaPipe Hands) 初期化と正確な座標補正
+  // AI (MediaPipe Hands) 初期化と座標補正
   // ==========================================
   useEffect(() => {
     const hands = new window.Hands({
@@ -109,7 +112,7 @@ export default function App() {
     });
 
     hands.onResults((results) => {
-      if (!isCameraOn || !videoRef.current) return;
+      if (!isCameraOn) return;
       if (!isAIReadyRef.current) {
         isAIReadyRef.current = true;
         setIsAIReadyState(true);
@@ -123,9 +126,9 @@ export default function App() {
         drawW = cw,
         drawH = ch;
 
-      if (videoRef.current.videoWidth) {
-        const imgW = videoRef.current.videoWidth;
-        const imgH = videoRef.current.videoHeight;
+      if (results.image) {
+        const imgW = results.image.width || 1280;
+        const imgH = results.image.height || 720;
         const scale = Math.max(cw / imgW, ch / imgH);
         drawW = imgW * scale;
         drawH = imgH * scale;
@@ -156,9 +159,9 @@ export default function App() {
       }
 
       if (currentMode === 'setup') {
-        renderSetupView(pA, pB, drawX, drawY, drawW, drawH);
+        renderSetupView(results, pA, pB, drawX, drawY, drawW, drawH);
       } else if (currentMode === 'game') {
-        renderGameBackground(drawX, drawY, drawW, drawH);
+        renderGameBackground(results, drawX, drawY, drawW, drawH);
         gameData.current.playerA = pA;
         gameData.current.playerB = pB;
       }
@@ -170,46 +173,26 @@ export default function App() {
   }, [isCameraOn, currentMode, thresholdDistance]);
 
   // ==========================================
-  // ★ 修正：カメラに「限界突破の4K解像度」を要求してズームを無効化する
+  // ★先生のソースコードと全く同じ、最も安定するカメラ起動方式
   // ==========================================
   useEffect(() => {
-    let active = true;
-    let frameId = null;
-
     if (isCameraOn) {
       setStatusMsg('カメラ・AIを起動中...');
       navigator.mediaDevices
         .getUserMedia({
-          video: {
-            // ★ ここが超重要！あえて途方もない解像度を理想値(ideal)に設定することで、
-            // カメラが勝手に「クロップ（切り抜き）」するのを防ぎ、最大広角の映像を引っ張り出します。
-            width: { ideal: 4096 },
-            height: { ideal: 2160 },
-            facingMode: 'user',
-          },
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
         })
         .then((stream) => {
-          if (!active) {
-            stream.getTracks().forEach((t) => t.stop());
-            return;
-          }
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
-            videoRef.current.onloadedmetadata = () => {
-              videoRef.current.play().then(() => {
-                const processFrame = async () => {
-                  if (
-                    !active ||
-                    !videoRef.current ||
-                    videoRef.current.readyState < 2
-                  )
-                    return;
-                  await handsRef.current.send({ image: videoRef.current });
-                  if (active) frameId = requestAnimationFrame(processFrame);
-                };
-                processFrame();
-              });
-            };
+            cameraRef.current = new window.Camera(videoRef.current, {
+              onFrame: async () => {
+                await handsRef.current.send({ image: videoRef.current });
+              },
+              width: 1280,
+              height: 720,
+            });
+            cameraRef.current.start();
           }
         })
         .catch((err) => {
@@ -223,42 +206,38 @@ export default function App() {
       canStartRef.current = false;
       setCanStart(false);
       setStatusMsg('');
-      if (videoRef.current && videoRef.current.srcObject) {
+      if (cameraRef.current) cameraRef.current.stop();
+      if (videoRef.current && videoRef.current.srcObject)
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-        videoRef.current.srcObject = null;
-      }
-      if (setupCanvasRef.current) {
-        const ctx = setupCanvasRef.current.getContext('2d');
-        ctx.clearRect(
-          0,
-          0,
-          setupCanvasRef.current.width,
-          setupCanvasRef.current.height,
-        );
-      }
     }
-
-    return () => {
-      active = false;
-      if (frameId) cancelAnimationFrame(frameId);
-    };
   }, [isCameraOn]);
 
-  const renderSetupView = (pA, pB, drawX, drawY, drawW, drawH) => {
+  const renderSetupView = (results, pA, pB, drawX, drawY, drawW, drawH) => {
     const canvas = setupCanvasRef.current;
-    if (!canvas || canvas.width === 0 || !videoRef.current) return;
+    if (!canvas || canvas.width === 0) return;
     const ctx = canvas.getContext('2d');
     const cw = canvas.width,
       ch = canvas.height;
 
     ctx.clearRect(0, 0, cw, ch);
 
-    if (videoRef.current.readyState >= 2) {
+    if (results.image) {
       ctx.save();
       ctx.translate(cw, 0);
       ctx.scale(-1, 1);
-      ctx.drawImage(videoRef.current, drawX, drawY, drawW, drawH);
+      ctx.drawImage(results.image, drawX, drawY, drawW, drawH);
       ctx.restore();
+
+      if (results.multiHandLandmarks) {
+        ctx.fillStyle = '#ff007f';
+        results.multiHandLandmarks.forEach((landmarks) => {
+          let nx = drawX + (1 - landmarks[9].x) * drawW;
+          let ny = drawY + landmarks[9].y * drawH;
+          ctx.beginPath();
+          ctx.arc(nx, ny, 10, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
     }
 
     const distance =
@@ -303,8 +282,9 @@ export default function App() {
 
     if (isAIReadyRef.current) {
       if (isConnected) {
-        if (!autoStartStartTimeRef.current)
+        if (!autoStartStartTimeRef.current) {
           autoStartStartTimeRef.current = Date.now();
+        }
         const elapsed = Date.now() - autoStartStartTimeRef.current;
         const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
 
@@ -352,9 +332,13 @@ export default function App() {
     ctx.fillText(label, x, y + 4);
   };
 
+  // ==========================================
+  // ゲーム本編 (Matter.js)
+  // ==========================================
   const startGame = () => {
     engineRef.current = Matter.Engine.create();
     engineRef.current.gravity.y = 0;
+
     autoStartStartTimeRef.current = null;
 
     gameData.current = {
@@ -370,6 +354,7 @@ export default function App() {
       ball: null,
       physicsPaddle: null,
       walls: [],
+      // アイテム用ステータス初期化
       items: [],
       isSlowMode: false,
       slowTimer: 0,
@@ -466,6 +451,7 @@ export default function App() {
       (b) => b !== blockBody,
     );
 
+    // ★追加：アイテムスポーン判定 (20%)
     if (Math.random() < 0.2) {
       const types = ['LIFE', 'SLOW', 'LONG'];
       const type = types[Math.floor(Math.random() * types.length)];
@@ -487,20 +473,18 @@ export default function App() {
     });
   };
 
-  const renderGameBackground = (drawX, drawY, drawW, drawH) => {
+  const renderGameBackground = (results, drawX, drawY, drawW, drawH) => {
     const canvas = bgCanvasRef.current;
-    if (!canvas || canvas.width === 0 || !videoRef.current) return;
+    if (!canvas || canvas.width === 0 || !results.image) return;
     const ctx = canvas.getContext('2d');
     const cw = canvas.width,
       ch = canvas.height;
     ctx.clearRect(0, 0, cw, ch);
-    if (videoRef.current.readyState >= 2) {
-      ctx.save();
-      ctx.translate(cw, 0);
-      ctx.scale(-1, 1);
-      ctx.drawImage(videoRef.current, drawX, drawY, drawW, drawH);
-      ctx.restore();
-    }
+    ctx.save();
+    ctx.translate(cw, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(results.image, drawX, drawY, drawW, drawH);
+    ctx.restore();
   };
 
   const gameLoop = () => {
@@ -513,6 +497,7 @@ export default function App() {
       ch = window.innerHeight;
     const now = Date.now();
 
+    // ★追加：アイテム効果のタイマー管理
     if (state.isSlowMode && now > state.slowTimer) state.isSlowMode = false;
     if (state.isLongBar && now > state.longBarTimer) state.isLongBar = false;
 
@@ -630,6 +615,7 @@ export default function App() {
       );
     });
 
+    // --- ★追加：アイテムの移動、描画、当たり判定 ---
     if (state.gameState === 'playing') {
       for (let i = state.items.length - 1; i >= 0; i--) {
         let item = state.items[i];
@@ -707,12 +693,16 @@ export default function App() {
           state.isReadyToDrop = false;
         }
       }
+
       if (state.ball && !state.isHoldingBall) {
         let vx = state.ball.velocity.x;
         let vy = state.ball.velocity.y;
+
+        // ★追加：水平無限ループ回避処理
         if (Math.abs(vy) < 1.5) {
           vy = vy < 0 ? -1.5 : 1.5;
         }
+
         const speed = Math.hypot(vx, vy);
         if (speed > 0)
           Matter.Body.setVelocity(state.ball, {
@@ -740,6 +730,7 @@ export default function App() {
       ctx.lineWidth = PADDLE_THICKNESS;
       ctx.lineCap = 'round';
       if (distance < activeThreshold) {
+        // ★追加：LONGアイテム中は黄金に輝く
         if (state.isLongBar) {
           ctx.strokeStyle = `rgb(255, 200, 50)`;
         } else {
@@ -815,6 +806,7 @@ export default function App() {
       ctx.font = 'bold 36px sans-serif';
       ctx.fillText(`SCORE: ${state.score}`, cw - 30, 60);
 
+      // --- ★追加：アイテム効果の発動中表示（画面下部） ---
       let effectText = [];
       if (state.isSlowMode)
         effectText.push(
