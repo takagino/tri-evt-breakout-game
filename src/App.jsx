@@ -5,8 +5,18 @@ import './index.css';
 // --- ゲーム設定定数 ---
 const BALL_SPEED = 8;
 const PADDLE_THICKNESS = 30;
-const RESPAWN_TIME = 8000;
+const RESPAWN_TIME = 5000;
 const AUTO_START_DELAY = 3000;
+
+// ★追加：線分と点の距離を測る数学関数（アイテムとバーの当たり判定用）
+const dist2 = (v, w) => (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
+const distToSegmentSquared = (p, v, w) => {
+  const l2 = dist2(v, w);
+  if (l2 === 0) return dist2(p, v);
+  let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return dist2(p, { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) });
+};
 
 export default function App() {
   const [currentMode, setCurrentMode] = useState('setup');
@@ -25,9 +35,7 @@ export default function App() {
   const setupCanvasRef = useRef(null);
   const bgCanvasRef = useRef(null);
   const gameCanvasRef = useRef(null);
-  const setupViewRef = useRef(null);
   const distanceTextRef = useRef(null);
-  const startBtnRef = useRef(null);
 
   const isAIReadyRef = useRef(false);
   const canStartRef = useRef(false);
@@ -37,7 +45,6 @@ export default function App() {
   const engineRef = useRef(null);
   const renderLoopIdRef = useRef(null);
   const handsRef = useRef(null);
-  const cameraRef = useRef(null);
 
   const gameData = useRef({
     playerA: { x: 0, y: 0 },
@@ -47,22 +54,25 @@ export default function App() {
     lives: 3,
     score: 0,
     blocks: [],
-    ball: null, // 初期状態はnull
+    ball: null,
     physicsPaddle: null,
     respawnQueue: [],
     gameState: 'playing',
     isNewRecord: false,
+    // アイテム管理用データ
+    items: [],
+    isSlowMode: false,
+    slowTimer: 0,
+    isLongBar: false,
+    longBarTimer: 0,
   });
 
   const resizeCanvases = useCallback(() => {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    if (setupViewRef.current && setupCanvasRef.current) {
-      const viewRect = setupViewRef.current.getBoundingClientRect();
-      if (viewRect.width > 0) {
-        setupCanvasRef.current.width = viewRect.width;
-        setupCanvasRef.current.height = viewRect.height;
-      }
+    if (setupCanvasRef.current) {
+      setupCanvasRef.current.width = w;
+      setupCanvasRef.current.height = h;
     }
     if (gameCanvasRef.current) {
       gameCanvasRef.current.width = w;
@@ -85,7 +95,7 @@ export default function App() {
   }, [resizeCanvases, currentMode]);
 
   // ==========================================
-  // AI (MediaPipe Hands) 初期化
+  // AI (MediaPipe Hands) 初期化と正確な座標補正
   // ==========================================
   useEffect(() => {
     const hands = new window.Hands({
@@ -100,20 +110,41 @@ export default function App() {
     });
 
     hands.onResults((results) => {
-      if (!isCameraOn) return;
+      if (!isCameraOn || !videoRef.current) return;
       if (!isAIReadyRef.current) {
         isAIReadyRef.current = true;
         setIsAIReadyState(true);
         setStatusMsg('');
       }
 
-      let pA = null,
-        pB = null;
+      const cw = window.innerWidth;
+      const ch = window.innerHeight;
+      let drawX = 0,
+        drawY = 0,
+        drawW = cw,
+        drawH = ch;
+
+      // ★修正：カメラの「生解像度」を使って、絶対にズームさせない(object-fit: cover)計算
+      if (videoRef.current.videoWidth) {
+        const imgW = videoRef.current.videoWidth;
+        const imgH = videoRef.current.videoHeight;
+        const scale = Math.max(cw / imgW, ch / imgH);
+        drawW = imgW * scale;
+        drawH = imgH * scale;
+        drawX = (cw - drawW) / 2;
+        drawY = (ch - drawH) / 2;
+      }
+
+      let pA = { x: 0, y: 0 },
+        pB = { x: 0, y: 0 };
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const handPositions = results.multiHandLandmarks
           .map((landmarks) => {
             let palm = landmarks[9];
-            return { x: 1 - palm.x, y: palm.y };
+            return {
+              x: drawX + (1 - palm.x) * drawW,
+              y: drawY + palm.y * drawH,
+            };
           })
           .sort((a, b) => a.x - b.x);
 
@@ -121,27 +152,17 @@ export default function App() {
           pA = handPositions[0];
           pB = handPositions[1];
         } else if (handPositions.length === 1) {
-          if (handPositions[0].x < 0.5) pA = handPositions[0];
+          if (handPositions[0].x < cw / 2) pA = handPositions[0];
           else pB = handPositions[0];
         }
       }
 
       if (currentMode === 'setup') {
-        renderSetupView(results, pA, pB);
+        renderSetupView(pA, pB, drawX, drawY, drawW, drawH);
       } else if (currentMode === 'game') {
-        renderGameBackground(results);
-        if (pA)
-          gameData.current.playerA = {
-            x: pA.x * window.innerWidth,
-            y: pA.y * window.innerHeight,
-          };
-        else gameData.current.playerA = { x: 0, y: 0 };
-        if (pB)
-          gameData.current.playerB = {
-            x: pB.x * window.innerWidth,
-            y: pB.y * window.innerHeight,
-          };
-        else gameData.current.playerB = { x: 0, y: 0 };
+        renderGameBackground(drawX, drawY, drawW, drawH);
+        gameData.current.playerA = pA;
+        gameData.current.playerB = pB;
       }
     });
     handsRef.current = hands;
@@ -150,22 +171,45 @@ export default function App() {
     };
   }, [isCameraOn, currentMode, thresholdDistance]);
 
+  // ==========================================
+  // ★ブラックボックスのCameraクラスを捨て、生カメラエンジンを使用
+  // ==========================================
   useEffect(() => {
+    let active = true;
+    let frameId = null;
+
     if (isCameraOn) {
       setStatusMsg('カメラ・AIを起動中...');
       navigator.mediaDevices
-        .getUserMedia({ video: { width: 1280, height: 720 } })
+        .getUserMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: 'user',
+          },
+        })
         .then((stream) => {
+          if (!active) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
-            cameraRef.current = new window.Camera(videoRef.current, {
-              onFrame: async () => {
-                await handsRef.current.send({ image: videoRef.current });
-              },
-              width: 1280,
-              height: 720,
-            });
-            cameraRef.current.start();
+            videoRef.current.onloadedmetadata = () => {
+              videoRef.current.play().then(() => {
+                const processFrame = async () => {
+                  if (
+                    !active ||
+                    !videoRef.current ||
+                    videoRef.current.readyState < 2
+                  )
+                    return;
+                  await handsRef.current.send({ image: videoRef.current });
+                  if (active) frameId = requestAnimationFrame(processFrame);
+                };
+                processFrame();
+              });
+            };
           }
         })
         .catch((err) => {
@@ -179,45 +223,49 @@ export default function App() {
       canStartRef.current = false;
       setCanStart(false);
       setStatusMsg('');
-      if (cameraRef.current) cameraRef.current.stop();
-      if (videoRef.current && videoRef.current.srcObject)
+      if (videoRef.current && videoRef.current.srcObject) {
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+        videoRef.current.srcObject = null;
+      }
+      if (setupCanvasRef.current) {
+        const ctx = setupCanvasRef.current.getContext('2d');
+        ctx.clearRect(
+          0,
+          0,
+          setupCanvasRef.current.width,
+          setupCanvasRef.current.height,
+        );
+      }
     }
+
+    return () => {
+      active = false;
+      if (frameId) cancelAnimationFrame(frameId);
+    };
   }, [isCameraOn]);
 
-  const renderSetupView = (results, rawPA, rawPB) => {
+  const renderSetupView = (pA, pB, drawX, drawY, drawW, drawH) => {
     const canvas = setupCanvasRef.current;
-    if (!canvas || canvas.width === 0) return;
+    if (!canvas || canvas.width === 0 || !videoRef.current) return;
     const ctx = canvas.getContext('2d');
     const cw = canvas.width,
       ch = canvas.height;
 
     ctx.clearRect(0, 0, cw, ch);
-    if (results.image) {
+
+    // ★生のビデオ要素を直接描画する
+    if (videoRef.current.readyState >= 2) {
       ctx.save();
+      ctx.translate(cw, 0);
       ctx.scale(-1, 1);
-      ctx.drawImage(results.image, -cw, 0, cw, ch);
+      ctx.drawImage(videoRef.current, drawX, drawY, drawW, drawH);
       ctx.restore();
-      if (results.multiHandLandmarks) {
-        ctx.fillStyle = '#ff007f';
-        results.multiHandLandmarks.forEach((landmarks) => {
-          let nx = (1 - landmarks[9].x) * cw;
-          let ny = landmarks[9].y * ch;
-          ctx.beginPath();
-          ctx.arc(nx, ny, 10, 0, Math.PI * 2);
-          ctx.fill();
-        });
-      }
     }
 
-    let pA = { x: 0, y: 0 },
-      pB = { x: 0, y: 0 };
-    if (rawPA) pA = { x: rawPA.x * cw, y: rawPA.y * ch };
-    if (rawPB) pB = { x: rawPB.x * cw, y: rawPB.y * ch };
-
-    const distance = Math.hypot(pB.x - pA.x, pB.y - pA.y);
+    const distance =
+      pA.x !== 0 && pB.x !== 0 ? Math.hypot(pB.x - pA.x, pB.y - pA.y) : 0;
     if (distanceTextRef.current)
-      distanceTextRef.current.textContent = `${Math.floor(distance)} px`;
+      distanceTextRef.current.textContent = `距離: ${Math.floor(distance)}px`;
 
     drawHandMarker(ctx, pA.x, pA.y, 'A');
     drawHandMarker(ctx, pB.x, pB.y, 'B');
@@ -256,9 +304,8 @@ export default function App() {
 
     if (isAIReadyRef.current) {
       if (isConnected) {
-        if (!autoStartStartTimeRef.current) {
+        if (!autoStartStartTimeRef.current)
           autoStartStartTimeRef.current = Date.now();
-        }
         const elapsed = Date.now() - autoStartStartTimeRef.current;
         const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
 
@@ -312,6 +359,8 @@ export default function App() {
   const startGame = () => {
     engineRef.current = Matter.Engine.create();
     engineRef.current.gravity.y = 0;
+    autoStartStartTimeRef.current = null;
+
     gameData.current = {
       ...gameData.current,
       isHoldingBall: true,
@@ -322,13 +371,17 @@ export default function App() {
       respawnQueue: [],
       gameState: 'playing',
       blocks: [],
-      ball: null, // ★開始時はボールを生成しない
+      ball: null,
       physicsPaddle: null,
       walls: [],
+      items: [],
+      isSlowMode: false,
+      slowTimer: 0,
+      isLongBar: false,
+      longBarTimer: 0,
     };
     resizeCanvases();
     createBlocks();
-    // ★ createBall(); を削除
 
     Matter.Events.on(engineRef.current, 'collisionStart', (e) => {
       if (gameData.current.gameState !== 'playing') return;
@@ -348,6 +401,7 @@ export default function App() {
     }
     gameData.current.blocks = [];
     gameData.current.ball = null;
+    autoStartStartTimeRef.current = null;
   };
 
   const resetPhysicsWalls = (w, h) => {
@@ -383,7 +437,7 @@ export default function App() {
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         let x = padding + c * (w + padding) + w / 2;
-        let y = 100 + r * (h + padding) + h / 2;
+        let y = 50 + r * (h + padding) + h / 2;
         let block = Matter.Bodies.rectangle(x, y, w, h, {
           isStatic: true,
           label: 'block',
@@ -397,7 +451,6 @@ export default function App() {
     Matter.World.add(engineRef.current.world, gameData.current.blocks);
   };
 
-  // ★ 座標を指定してボールを生成する関数に変更
   const createBall = (x, y) => {
     gameData.current.ball = Matter.Bodies.circle(x, y, 20, {
       restitution: 1.05,
@@ -416,6 +469,19 @@ export default function App() {
     gameData.current.blocks = gameData.current.blocks.filter(
       (b) => b !== blockBody,
     );
+
+    // アイテムスポーン判定 (20%)
+    if (Math.random() < 0.2) {
+      const types = ['LIFE', 'SLOW', 'LONG'];
+      const type = types[Math.floor(Math.random() * types.length)];
+      gameData.current.items.push({
+        x: blockBody.position.x,
+        y: blockBody.position.y,
+        type: type,
+        speed: 3,
+      });
+    }
+
     gameData.current.respawnQueue.push({
       x: blockBody.position.x,
       y: blockBody.position.y,
@@ -426,15 +492,20 @@ export default function App() {
     });
   };
 
-  const renderGameBackground = (results) => {
+  const renderGameBackground = (drawX, drawY, drawW, drawH) => {
     const canvas = bgCanvasRef.current;
-    if (!canvas || canvas.width === 0 || !results.image) return;
+    if (!canvas || canvas.width === 0 || !videoRef.current) return;
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.save();
-    ctx.scale(-1, 1);
-    ctx.drawImage(results.image, -canvas.width, 0, canvas.width, canvas.height);
-    ctx.restore();
+    const cw = canvas.width,
+      ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+    if (videoRef.current.readyState >= 2) {
+      ctx.save();
+      ctx.translate(cw, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(videoRef.current, drawX, drawY, drawW, drawH);
+      ctx.restore();
+    }
   };
 
   const gameLoop = () => {
@@ -445,6 +516,16 @@ export default function App() {
     if (!ctx || !engine) return;
     const cw = window.innerWidth,
       ch = window.innerHeight;
+    const now = Date.now();
+
+    // アイテム効果のタイマー管理
+    if (state.isSlowMode && now > state.slowTimer) state.isSlowMode = false;
+    if (state.isLongBar && now > state.longBarTimer) state.isLongBar = false;
+
+    const activeBallSpeed = state.isSlowMode ? BALL_SPEED * 0.5 : BALL_SPEED;
+    const activeThreshold = state.isLongBar
+      ? thresholdDistance * 1.5
+      : thresholdDistance;
 
     if (state.physicsPaddle) {
       Matter.Composite.remove(engine.world, state.physicsPaddle);
@@ -463,7 +544,7 @@ export default function App() {
       let cx = (state.playerA.x + state.playerB.x) / 2,
         cy = (state.playerA.y + state.playerB.y) / 2;
 
-      if (distance < thresholdDistance) {
+      if (distance < activeThreshold) {
         let angle = Math.atan2(
           state.playerB.y - state.playerA.y,
           state.playerB.x - state.playerA.x,
@@ -483,7 +564,6 @@ export default function App() {
         );
         Matter.World.add(engine.world, state.physicsPaddle);
 
-        // ★ 手が近づいた時にボールが存在しなければ「召喚」する
         if (!state.ball) {
           createBall(cx, cy - PADDLE_THICKNESS - 10);
           state.isHoldingBall = true;
@@ -491,32 +571,28 @@ export default function App() {
         }
       }
 
-      // ボールの保持と発射
       if (state.ball && state.isHoldingBall) {
-        if (distance < thresholdDistance) {
-          // 手が近い間はホールドし続ける
+        if (distance < activeThreshold) {
           Matter.Body.setPosition(state.ball, {
             x: cx,
             y: cy - PADDLE_THICKNESS - 10,
           });
           Matter.Body.setVelocity(state.ball, { x: 0, y: 0 });
           state.isReadyToDrop = true;
-        } else if (distance >= thresholdDistance && state.isReadyToDrop) {
-          // 手が離れたら発射！
+        } else if (distance >= activeThreshold && state.isReadyToDrop) {
           state.isHoldingBall = false;
           state.isReadyToDrop = false;
           let xDir = Math.random() > 0.5 ? 1 : -1;
-          let xSpeed = BALL_SPEED * (0.2 + Math.random() * 0.2);
+          let xSpeed = activeBallSpeed * (0.2 + Math.random() * 0.2);
           Matter.Body.setVelocity(state.ball, {
             x: xSpeed * xDir,
-            y: -BALL_SPEED,
+            y: -activeBallSpeed,
           });
         }
       }
     }
 
     if (state.gameState === 'playing') {
-      const now = Date.now();
       for (let i = state.respawnQueue.length - 1; i >= 0; i--) {
         if (now >= state.respawnQueue[i].respawnAt) {
           let info = state.respawnQueue[i];
@@ -560,13 +636,66 @@ export default function App() {
       );
     });
 
+    // アイテムの移動・描画・当たり判定
+    if (state.gameState === 'playing') {
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        let item = state.items[i];
+        item.y += item.speed;
+
+        ctx.fillStyle =
+          item.type === 'LIFE'
+            ? '#ff3366'
+            : item.type === 'SLOW'
+              ? '#33ccff'
+              : '#ccff33';
+        ctx.beginPath();
+        ctx.arc(item.x, item.y, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = ctx.fillStyle;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        let icon =
+          item.type === 'LIFE' ? '💖' : item.type === 'SLOW' ? '🐢' : '↔️';
+        ctx.fillText(icon, item.x, item.y + 5);
+
+        let isHit = false;
+        if (state.playerA.x !== 0 && state.playerB.x !== 0) {
+          const d2 = distToSegmentSquared(
+            { x: item.x, y: item.y },
+            state.playerA,
+            state.playerB,
+          );
+          if (d2 <= Math.pow(18 + PADDLE_THICKNESS / 2, 2)) isHit = true;
+        }
+
+        if (isHit) {
+          if (item.type === 'LIFE') state.lives++;
+          else if (item.type === 'SLOW') {
+            state.isSlowMode = true;
+            state.slowTimer = now + 10000;
+          } else if (item.type === 'LONG') {
+            state.isLongBar = true;
+            state.longBarTimer = now + 10000;
+          }
+          state.items.splice(i, 1);
+          continue;
+        }
+
+        if (item.y > ch + 30) state.items.splice(i, 1);
+      }
+    }
+
     if (state.ball && state.gameState === 'playing') {
       ctx.fillStyle = '#fff';
       ctx.beginPath();
       ctx.arc(state.ball.position.x, state.ball.position.y, 20, 0, 2 * Math.PI);
       ctx.fill();
 
-      // ミス時の処理
       if (state.ball.position.y > ch + 50) {
         state.lives--;
         if (state.lives <= 0) {
@@ -579,7 +708,6 @@ export default function App() {
           Matter.Composite.remove(engine.world, state.ball);
           state.ball = null;
         } else {
-          // ★ ミスした時はボールを消去（画面から消す）
           Matter.Composite.remove(engine.world, state.ball);
           state.ball = null;
           state.isHoldingBall = true;
@@ -590,8 +718,8 @@ export default function App() {
         const speed = Math.hypot(state.ball.velocity.x, state.ball.velocity.y);
         if (speed > 0)
           Matter.Body.setVelocity(state.ball, {
-            x: (state.ball.velocity.x / speed) * BALL_SPEED,
-            y: (state.ball.velocity.y / speed) * BALL_SPEED,
+            x: (state.ball.velocity.x / speed) * activeBallSpeed,
+            y: (state.ball.velocity.y / speed) * activeBallSpeed,
           });
       }
     }
@@ -607,14 +735,18 @@ export default function App() {
       );
       let cx = (state.playerA.x + state.playerB.x) / 2,
         cy = (state.playerA.y + state.playerB.y) / 2;
-      const ratio = Math.min(distance / thresholdDistance, 1);
+      const ratio = Math.min(distance / activeThreshold, 1);
       const r = Math.floor(255 * ratio),
         g = Math.floor(255 * (1 - ratio));
 
       ctx.lineWidth = PADDLE_THICKNESS;
       ctx.lineCap = 'round';
-      if (distance < thresholdDistance) {
-        ctx.strokeStyle = `rgb(${r}, ${g}, 200)`;
+      if (distance < activeThreshold) {
+        if (state.isLongBar) {
+          ctx.strokeStyle = `rgb(255, 200, 50)`;
+        } else {
+          ctx.strokeStyle = `rgb(${r}, ${g}, 200)`;
+        }
         ctx.shadowBlur = 15;
         ctx.shadowColor = ctx.strokeStyle;
         ctx.setLineDash([]);
@@ -630,8 +762,7 @@ export default function App() {
       ctx.setLineDash([]);
       ctx.shadowBlur = 0;
 
-      // ★ 状態に応じたナビゲーションテキストの切り替え
-      if (!state.ball && distance >= thresholdDistance) {
+      if (!state.ball && distance >= activeThreshold) {
         ctx.fillStyle = '#fff';
         ctx.font = '24px bold sans-serif';
         ctx.textAlign = 'center';
@@ -642,7 +773,7 @@ export default function App() {
       } else if (
         state.isHoldingBall &&
         state.isReadyToDrop &&
-        distance < thresholdDistance
+        distance < activeThreshold
       ) {
         ctx.fillStyle = '#fff';
         ctx.font = '24px bold sans-serif';
@@ -685,6 +816,27 @@ export default function App() {
       ctx.textAlign = 'right';
       ctx.font = 'bold 36px sans-serif';
       ctx.fillText(`SCORE: ${state.score}`, cw - 30, 60);
+
+      let effectText = [];
+      if (state.isSlowMode)
+        effectText.push(
+          `🐢 スロー: 残り ${Math.ceil((state.slowTimer - now) / 1000)}秒`,
+        );
+      if (state.isLongBar)
+        effectText.push(
+          `↔️ ロング: 残り ${Math.ceil((state.longBarTimer - now) / 1000)}秒`,
+        );
+      if (effectText.length > 0) {
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#ff00ff';
+        effectText.forEach((text, idx) => {
+          ctx.fillText(text, cw / 2, ch - 80 + idx * 30);
+        });
+        ctx.shadowBlur = 0;
+      }
     } else {
       ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
       ctx.fillRect(0, 0, cw, ch);
@@ -706,6 +858,76 @@ export default function App() {
         }
       }
       ctx.shadowBlur = 0;
+
+      if (state.playerA.x !== 0 && state.playerB.x !== 0) {
+        let distance = Math.hypot(
+          state.playerB.x - state.playerA.x,
+          state.playerB.y - state.playerA.y,
+        );
+        const ratio = Math.min(distance / thresholdDistance, 1);
+        const r = Math.floor(255 * ratio),
+          g = Math.floor(255 * (1 - ratio));
+        ctx.lineWidth = 15;
+        ctx.lineCap = 'round';
+        if (distance < thresholdDistance) {
+          ctx.strokeStyle = `rgb(${r}, ${g}, 200)`;
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = ctx.strokeStyle;
+          ctx.setLineDash([]);
+        } else {
+          ctx.strokeStyle = 'rgba(255, 50, 50, 0.4)';
+          ctx.shadowBlur = 0;
+          ctx.setLineDash([10, 20]);
+        }
+        ctx.beginPath();
+        ctx.moveTo(state.playerA.x, state.playerA.y);
+        ctx.lineTo(state.playerB.x, state.playerB.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+
+        drawHandMarker(ctx, state.playerA.x, state.playerA.y, 'A');
+        drawHandMarker(ctx, state.playerB.x, state.playerB.y, 'B');
+
+        if (distance < thresholdDistance) {
+          if (!autoStartStartTimeRef.current)
+            autoStartStartTimeRef.current = Date.now();
+          const elapsed = Date.now() - autoStartStartTimeRef.current;
+          const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
+          if (remaining > 0) {
+            ctx.fillStyle = '#00ffcc';
+            ctx.font = 'bold 30px sans-serif';
+            ctx.fillText(
+              `調整画面に戻ります: ${remaining}`,
+              cw / 2,
+              ch / 2 + 150,
+            );
+          }
+          if (elapsed >= AUTO_START_DELAY) {
+            autoStartStartTimeRef.current = null;
+            handleBackToSetup();
+            return;
+          }
+        } else {
+          autoStartStartTimeRef.current = null;
+          ctx.fillStyle = '#fff';
+          ctx.font = '24px sans-serif';
+          ctx.fillText(
+            '2人で手を近づけて3秒キープで最初の画面に戻るよ',
+            cw / 2,
+            ch / 2 + 150,
+          );
+        }
+      } else {
+        autoStartStartTimeRef.current = null;
+        ctx.fillStyle = '#fff';
+        ctx.font = '24px sans-serif';
+        ctx.fillText(
+          'カメラに両手をかざして、手を近づけると最初の画面に戻るよ',
+          cw / 2,
+          ch / 2 + 150,
+        );
+      }
     }
   };
 
@@ -716,7 +938,6 @@ export default function App() {
       startGame();
     }, 50);
   };
-
   const handleBackToSetup = () => {
     setCurrentMode('setup');
     stopGame();
@@ -733,70 +954,150 @@ export default function App() {
         muted
       ></video>
       {statusMsg && <div id="status-overlay">{statusMsg}</div>}
+
       <div
         id="setup-screen"
-        style={{ display: currentMode === 'setup' ? 'flex' : 'none' }}
+        style={{ display: currentMode === 'setup' ? 'block' : 'none' }}
       >
-        <div id="setup-view" ref={setupViewRef}>
-          <div id="setup-highscore">
-            本日のハイスコア: <span>{highScore}</span>
-          </div>
-          <canvas id="setup-canvas" ref={setupCanvasRef}></canvas>
+        <canvas
+          id="setup-canvas"
+          ref={setupCanvasRef}
+          style={{
+            width: '100%',
+            height: '100%',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+          }}
+        ></canvas>
+        <div id="setup-highscore">
+          本日のハイスコア: <span>{highScore}</span>
         </div>
-        <div className="controls">
-          <div className="control-group">
-            <div className="switch-row">
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={isCameraOn}
-                  onChange={(e) => setIsCameraOn(e.target.checked)}
-                />
-                <span className="slider"></span>
-              </label>
-              <span>カメラON (AI起動)</span>
-            </div>
-          </div>
-          <div className="control-group" style={{ flex: 1 }}>
-            <label>
-              バーが繋がる限界距離 (閾値): <span>{thresholdDistance}</span>px
+
+        <div
+          className="controls"
+          style={{
+            position: 'absolute',
+            bottom: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: '95%',
+            maxWidth: '800px',
+            padding: '10px 20px',
+            background: 'rgba(0, 0, 0, 0.6)',
+            border: '1px solid rgba(255, 255, 255, 0.2)',
+            borderRadius: '50px',
+            backdropFilter: 'blur(8px)',
+            display: 'flex',
+            flexDirection: 'row',
+            gap: '15px',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            zIndex: 10,
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <label
+              className="switch"
+              style={{ width: '36px', height: '20px', margin: 0 }}
+            >
+              <input
+                type="checkbox"
+                checked={isCameraOn}
+                onChange={(e) => setIsCameraOn(e.target.checked)}
+              />
+              <span className="slider" style={{ borderRadius: '20px' }}></span>
             </label>
+            <span style={{ fontSize: '14px', fontWeight: 'bold' }}>AI起動</span>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              flex: 1,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <span style={{ fontSize: '12px', color: '#aaa' }}>
+              閾値:{thresholdDistance}px
+            </span>
             <input
               type="range"
               min="50"
               max="1000"
               value={thresholdDistance}
               onChange={(e) => setThresholdDistance(Number(e.target.value))}
+              style={{ flex: 1, minWidth: '80px', margin: 0 }}
             />
-            <label>現在の手の距離:</label>
-            <div id="distance-display" ref={distanceTextRef}>
-              --- px
-            </div>
-          </div>
-          <div className="start-btn-container">
-            <button
-              id="start-btn"
-              onClick={handleStartGame}
-              disabled={!canStart}
+            <span
+              id="distance-display"
+              ref={distanceTextRef}
               style={{
-                background: canStart ? '#00ffcc' : '#555',
-                color: canStart ? '#000' : '#ccc',
+                fontSize: '14px',
+                fontWeight: 'bold',
+                color: '#00ffcc',
+                minWidth: '80px',
+                textAlign: 'right',
               }}
             >
-              {canStart
-                ? '3秒キープでスタート！'
-                : isAIReadyState
-                  ? '2人で手を近づけて3秒待機！'
-                  : 'AIを起動してください'}
-            </button>
+              距離: ---px
+            </span>
           </div>
+
+          <button
+            id="start-btn"
+            onClick={handleStartGame}
+            disabled={!canStart}
+            style={{
+              background: canStart ? '#00ffcc' : '#555',
+              color: canStart ? '#000' : '#ccc',
+              padding: '8px 16px',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              border: 'none',
+              borderRadius: '20px',
+              cursor: canStart ? 'pointer' : 'not-allowed',
+              whiteSpace: 'nowrap',
+              transition: '0.3s',
+              minWidth: 'auto',
+              margin: 0,
+            }}
+          >
+            {canStart
+              ? '3秒キープで開始！'
+              : isAIReadyState
+                ? '手を近づけて待機'
+                : 'AI起動待ち'}
+          </button>
         </div>
       </div>
+
       <div
         id="game-screen"
         style={{ display: currentMode === 'game' ? 'block' : 'none' }}
       >
-        <button id="back-btn" onClick={handleBackToSetup}>
+        <button
+          id="back-btn"
+          onClick={handleBackToSetup}
+          style={{
+            padding: '8px 16px',
+            fontSize: '14px',
+            borderRadius: '20px',
+            position: 'absolute',
+            right: '20px',
+            bottom: '20px',
+            zIndex: 100,
+          }}
+        >
           ← 調整に戻る
         </button>
         <canvas id="bg-canvas" ref={bgCanvasRef}></canvas>
