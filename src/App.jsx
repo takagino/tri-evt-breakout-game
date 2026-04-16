@@ -3,12 +3,12 @@ import Matter from 'matter-js';
 import './index.css';
 
 // --- ゲーム設定定数 ---
-const BALL_SPEED = 8;
+const BALL_SPEED = 7;
 const PADDLE_THICKNESS = 30;
 const RESPAWN_TIME = 5000;
 const AUTO_START_DELAY = 3000;
 
-// ★追加：線分と点の距離を測る数学関数（アイテムとバーの当たり判定用）
+// 線分と点の距離を測る数学関数（アイテムとバーの当たり判定用）
 const dist2 = (v, w) => (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
 const distToSegmentSquared = (p, v, w) => {
   const l2 = dist2(v, w);
@@ -59,7 +59,6 @@ export default function App() {
     respawnQueue: [],
     gameState: 'playing',
     isNewRecord: false,
-    // アイテム管理用データ
     items: [],
     isSlowMode: false,
     slowTimer: 0,
@@ -124,7 +123,6 @@ export default function App() {
         drawW = cw,
         drawH = ch;
 
-      // ★修正：カメラの「生解像度」を使って、絶対にズームさせない(object-fit: cover)計算
       if (videoRef.current.videoWidth) {
         const imgW = videoRef.current.videoWidth;
         const imgH = videoRef.current.videoHeight;
@@ -172,7 +170,7 @@ export default function App() {
   }, [isCameraOn, currentMode, thresholdDistance]);
 
   // ==========================================
-  // ★ブラックボックスのCameraクラスを捨て、生カメラエンジンを使用
+  // ★ 修正：カメラに「限界突破の4K解像度」を要求してズームを無効化する
   // ==========================================
   useEffect(() => {
     let active = true;
@@ -183,8 +181,10 @@ export default function App() {
       navigator.mediaDevices
         .getUserMedia({
           video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
+            // ★ ここが超重要！あえて途方もない解像度を理想値(ideal)に設定することで、
+            // カメラが勝手に「クロップ（切り抜き）」するのを防ぎ、最大広角の映像を引っ張り出します。
+            width: { ideal: 4096 },
+            height: { ideal: 2160 },
             facingMode: 'user',
           },
         })
@@ -253,7 +253,6 @@ export default function App() {
 
     ctx.clearRect(0, 0, cw, ch);
 
-    // ★生のビデオ要素を直接描画する
     if (videoRef.current.readyState >= 2) {
       ctx.save();
       ctx.translate(cw, 0);
@@ -353,9 +352,6 @@ export default function App() {
     ctx.fillText(label, x, y + 4);
   };
 
-  // ==========================================
-  // ゲーム本編 (Matter.js)
-  // ==========================================
   const startGame = () => {
     engineRef.current = Matter.Engine.create();
     engineRef.current.gravity.y = 0;
@@ -470,7 +466,6 @@ export default function App() {
       (b) => b !== blockBody,
     );
 
-    // アイテムスポーン判定 (20%)
     if (Math.random() < 0.2) {
       const types = ['LIFE', 'SLOW', 'LONG'];
       const type = types[Math.floor(Math.random() * types.length)];
@@ -518,7 +513,6 @@ export default function App() {
       ch = window.innerHeight;
     const now = Date.now();
 
-    // アイテム効果のタイマー管理
     if (state.isSlowMode && now > state.slowTimer) state.isSlowMode = false;
     if (state.isLongBar && now > state.longBarTimer) state.isLongBar = false;
 
@@ -636,7 +630,6 @@ export default function App() {
       );
     });
 
-    // アイテムの移動・描画・当たり判定
     if (state.gameState === 'playing') {
       for (let i = state.items.length - 1; i >= 0; i--) {
         let item = state.items[i];
@@ -715,11 +708,16 @@ export default function App() {
         }
       }
       if (state.ball && !state.isHoldingBall) {
-        const speed = Math.hypot(state.ball.velocity.x, state.ball.velocity.y);
+        let vx = state.ball.velocity.x;
+        let vy = state.ball.velocity.y;
+        if (Math.abs(vy) < 1.5) {
+          vy = vy < 0 ? -1.5 : 1.5;
+        }
+        const speed = Math.hypot(vx, vy);
         if (speed > 0)
           Matter.Body.setVelocity(state.ball, {
-            x: (state.ball.velocity.x / speed) * activeBallSpeed,
-            y: (state.ball.velocity.y / speed) * activeBallSpeed,
+            x: (vx / speed) * activeBallSpeed,
+            y: (vy / speed) * activeBallSpeed,
           });
       }
     }
@@ -826,6 +824,7 @@ export default function App() {
         effectText.push(
           `↔️ ロング: 残り ${Math.ceil((state.longBarTimer - now) / 1000)}秒`,
         );
+
       if (effectText.length > 0) {
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 24px sans-serif';
@@ -894,6 +893,7 @@ export default function App() {
             autoStartStartTimeRef.current = Date.now();
           const elapsed = Date.now() - autoStartStartTimeRef.current;
           const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
+
           if (remaining > 0) {
             ctx.fillStyle = '#00ffcc';
             ctx.font = 'bold 30px sans-serif';
@@ -903,6 +903,7 @@ export default function App() {
               ch / 2 + 150,
             );
           }
+
           if (elapsed >= AUTO_START_DELAY) {
             autoStartStartTimeRef.current = null;
             handleBackToSetup();
@@ -938,6 +939,7 @@ export default function App() {
       startGame();
     }, 50);
   };
+
   const handleBackToSetup = () => {
     setCurrentMode('setup');
     stopGame();
