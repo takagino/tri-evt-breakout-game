@@ -35,7 +35,7 @@ export default function App() {
   // AIとゲーム用のRef
   const engineRef = useRef(null);
   const renderLoopIdRef = useRef(null);
-  const handsRef = useRef(null); // ★ Hands用に変更
+  const handsRef = useRef(null);
   const cameraRef = useRef(null);
 
   const gameData = useRef({
@@ -87,7 +87,7 @@ export default function App() {
   }, [resizeCanvases, currentMode]);
 
   // ==========================================
-  // ★ AI (MediaPipe Hands) の初期化
+  // AI (MediaPipe Hands) の初期化
   // ==========================================
   useEffect(() => {
     const hands = new window.Hands({
@@ -95,7 +95,7 @@ export default function App() {
         `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
     });
     hands.setOptions({
-      maxNumHands: 2, // ★ 画面内で最大2つの手だけを検知する
+      maxNumHands: 2,
       modelComplexity: 1,
       minDetectionConfidence: 0.6,
       minTrackingConfidence: 0.6,
@@ -113,19 +113,17 @@ export default function App() {
       let pA = null,
         pB = null;
 
-      // ★ 手の検知ロジック
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        // 全ての手の「手のひら中央（9番：中指の付け根）」の座標を取得し、X座標（左から右）でソート
         const handPositions = results.multiHandLandmarks
           .map((landmarks) => {
             let palm = landmarks[9];
-            return { x: 1 - palm.x, y: palm.y }; // カメラ反転
+            return { x: 1 - palm.x, y: palm.y };
           })
           .sort((a, b) => a.x - b.x);
 
         if (handPositions.length >= 2) {
-          pA = handPositions[0]; // 左手（左の人）
-          pB = handPositions[1]; // 右手（右の人）
+          pA = handPositions[0];
+          pB = handPositions[1];
         } else if (handPositions.length === 1) {
           if (handPositions[0].x < 0.5) pA = handPositions[0];
           else pB = handPositions[0];
@@ -219,7 +217,6 @@ export default function App() {
       ctx.drawImage(results.image, -cw, 0, cw, ch);
       ctx.restore();
 
-      // ★デバッグ表示：検知した手の「手のひら」にピンクの点を打つ
       if (results.multiHandLandmarks) {
         ctx.fillStyle = '#ff007f';
         results.multiHandLandmarks.forEach((landmarks) => {
@@ -242,7 +239,6 @@ export default function App() {
     if (distanceTextRef.current)
       distanceTextRef.current.textContent = `${Math.floor(distance)} px`;
 
-    // マーカーのラベルを「Hand A」「Hand B」に変更
     drawHandMarker(ctx, pA.x, pA.y, 'Hand A');
     drawHandMarker(ctx, pB.x, pB.y, 'Hand B');
 
@@ -294,7 +290,6 @@ export default function App() {
     ctx.strokeStyle = '#00ffcc';
     ctx.lineWidth = 2;
     ctx.stroke();
-    // 小さい文字で表示
     ctx.fillStyle = '#fff';
     ctx.font = '12px bold sans-serif';
     ctx.textAlign = 'center';
@@ -352,19 +347,21 @@ export default function App() {
     gameData.current.walls.forEach((wall) =>
       Matter.Composite.remove(engineRef.current.world, wall),
     );
+
+    // ★変更：壁を「左・右・上」に配置（下を開放）
     gameData.current.walls = [
       Matter.Bodies.rectangle(-25, h / 2, 50, h, {
         isStatic: true,
         restitution: 1,
-      }),
+      }), // 左
       Matter.Bodies.rectangle(w + 25, h / 2, 50, h, {
         isStatic: true,
         restitution: 1,
-      }),
-      Matter.Bodies.rectangle(w / 2, h + 25, w, 50, {
+      }), // 右
+      Matter.Bodies.rectangle(w / 2, -25, w, 50, {
         isStatic: true,
         restitution: 1,
-      }),
+      }), // 上
     ];
     Matter.World.add(engineRef.current.world, gameData.current.walls);
   };
@@ -380,7 +377,8 @@ export default function App() {
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         let x = padding + c * (w + padding) + w / 2;
-        let y = ch - 100 - r * (h + padding) - h / 2;
+        // ★変更：画面の「上」の方にブロックを配置
+        let y = 100 + r * (h + padding) + h / 2;
         let block = Matter.Bodies.rectangle(x, y, w, h, {
           isStatic: true,
           label: 'block',
@@ -488,9 +486,10 @@ export default function App() {
       }
 
       if (state.ball && state.isHoldingBall) {
+        // ★変更：ボールをバーの「上」にホールドする
         Matter.Body.setPosition(state.ball, {
           x: cx,
-          y: cy + PADDLE_THICKNESS + 10,
+          y: cy - PADDLE_THICKNESS - 10,
         });
         Matter.Body.setVelocity(state.ball, { x: 0, y: 0 });
 
@@ -501,9 +500,10 @@ export default function App() {
           state.isReadyToDrop = false;
           let xDir = Math.random() > 0.5 ? 1 : -1;
           let xSpeed = BALL_SPEED * (0.2 + Math.random() * 0.2);
+          // ★変更：ボールを「上（マイナス方向）」に発射する
           Matter.Body.setVelocity(state.ball, {
             x: xSpeed * xDir,
-            y: BALL_SPEED,
+            y: -BALL_SPEED,
           });
         }
       }
@@ -560,7 +560,8 @@ export default function App() {
       ctx.arc(state.ball.position.x, state.ball.position.y, 20, 0, 2 * Math.PI);
       ctx.fill();
 
-      if (state.ball.position.y < -50) {
+      // ★変更：画面の「下」に落ちたらミス（アウト）
+      if (state.ball.position.y > ch + 50) {
         state.lives--;
         if (state.lives <= 0) {
           state.gameState = 'gameover';
@@ -629,11 +630,11 @@ export default function App() {
         ctx.textAlign = 'center';
         ctx.shadowBlur = 5;
         ctx.shadowColor = '#000';
-        // メッセージを手に合わせて変更
+        // ★変更：テキストがボールと被らないようにバーの少し下に表示
         ctx.fillText(
-          '手を離してドロップ！',
+          '手を離して発射！',
           (state.playerA.x + state.playerB.x) / 2,
-          (state.playerA.y + state.playerB.y) / 2 - 30,
+          (state.playerA.y + state.playerB.y) / 2 + 40,
         );
         ctx.shadowBlur = 0;
       }
@@ -649,11 +650,13 @@ export default function App() {
       ctx.fillStyle = '#ffcc00';
       ctx.font = '24px sans-serif';
       ctx.textAlign = 'center';
+
       ctx.fillText(
         `HIGH SCORE: ${Math.max(parseInt(localStorage.getItem('breakout_highscore') || '0', 10), state.score)}`,
         cw / 2,
         40,
       );
+
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'right';
       ctx.font = 'bold 36px sans-serif';
