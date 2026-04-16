@@ -6,6 +6,7 @@ import './index.css';
 const BALL_SPEED = 8;
 const PADDLE_THICKNESS = 30;
 const RESPAWN_TIME = 5000;
+const AUTO_START_DELAY = 3000; // ★オートスタートまでの時間（3000ms = 3秒）
 
 export default function App() {
   const [currentMode, setCurrentMode] = useState('setup');
@@ -25,12 +26,14 @@ export default function App() {
   const bgCanvasRef = useRef(null);
   const gameCanvasRef = useRef(null);
   const setupViewRef = useRef(null);
-
   const distanceTextRef = useRef(null);
   const startBtnRef = useRef(null);
 
   const isAIReadyRef = useRef(false);
   const canStartRef = useRef(false);
+
+  // ★オートスタート用の管理Ref
+  const autoStartStartTimeRef = useRef(null);
 
   // AIとゲーム用のRef
   const engineRef = useRef(null);
@@ -56,7 +59,6 @@ export default function App() {
   const resizeCanvases = useCallback(() => {
     const w = window.innerWidth;
     const h = window.innerHeight;
-
     if (setupViewRef.current && setupCanvasRef.current) {
       const viewRect = setupViewRef.current.getBoundingClientRect();
       if (viewRect.width > 0) {
@@ -64,7 +66,6 @@ export default function App() {
         setupCanvasRef.current.height = viewRect.height;
       }
     }
-
     if (gameCanvasRef.current) {
       gameCanvasRef.current.width = w;
       gameCanvasRef.current.height = h;
@@ -73,7 +74,6 @@ export default function App() {
       bgCanvasRef.current.width = w;
       bgCanvasRef.current.height = h;
     }
-
     if (currentMode === 'game') resetPhysicsWalls(w, h);
   }, [currentMode]);
 
@@ -87,7 +87,7 @@ export default function App() {
   }, [resizeCanvases, currentMode]);
 
   // ==========================================
-  // AI (MediaPipe Hands) の初期化
+  // AI (MediaPipe Hands) 初期化
   // ==========================================
   useEffect(() => {
     const hands = new window.Hands({
@@ -103,7 +103,6 @@ export default function App() {
 
     hands.onResults((results) => {
       if (!isCameraOn) return;
-
       if (!isAIReadyRef.current) {
         isAIReadyRef.current = true;
         setIsAIReadyState(true);
@@ -112,7 +111,6 @@ export default function App() {
 
       let pA = null,
         pB = null;
-
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const handPositions = results.multiHandLandmarks
           .map((landmarks) => {
@@ -140,7 +138,6 @@ export default function App() {
             y: pA.y * window.innerHeight,
           };
         else gameData.current.playerA = { x: 0, y: 0 };
-
         if (pB)
           gameData.current.playerB = {
             x: pB.x * window.innerWidth,
@@ -149,9 +146,7 @@ export default function App() {
         else gameData.current.playerB = { x: 0, y: 0 };
       }
     });
-
     handsRef.current = hands;
-
     return () => {
       if (handsRef.current) handsRef.current.close();
     };
@@ -159,7 +154,7 @@ export default function App() {
 
   useEffect(() => {
     if (isCameraOn) {
-      setStatusMsg('カメラ・AI（ハンドトラッキング）を起動中...');
+      setStatusMsg('カメラ・AIを起動中...');
       navigator.mediaDevices
         .getUserMedia({ video: { width: 1280, height: 720 } })
         .then((stream) => {
@@ -187,21 +182,14 @@ export default function App() {
       setCanStart(false);
       setStatusMsg('');
       if (cameraRef.current) cameraRef.current.stop();
-      if (videoRef.current && videoRef.current.srcObject) {
+      if (videoRef.current && videoRef.current.srcObject)
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-      }
-      if (setupCanvasRef.current) {
-        const ctx = setupCanvasRef.current.getContext('2d');
-        ctx.clearRect(
-          0,
-          0,
-          setupCanvasRef.current.width,
-          setupCanvasRef.current.height,
-        );
-      }
     }
   }, [isCameraOn]);
 
+  // ==========================================
+  // 調整画面描画 ＆ オートスタートロジック
+  // ==========================================
   const renderSetupView = (results, rawPA, rawPB) => {
     const canvas = setupCanvasRef.current;
     if (!canvas || canvas.width === 0) return;
@@ -210,13 +198,11 @@ export default function App() {
       ch = canvas.height;
 
     ctx.clearRect(0, 0, cw, ch);
-
     if (results.image) {
       ctx.save();
       ctx.scale(-1, 1);
       ctx.drawImage(results.image, -cw, 0, cw, ch);
       ctx.restore();
-
       if (results.multiHandLandmarks) {
         ctx.fillStyle = '#ff007f';
         results.multiHandLandmarks.forEach((landmarks) => {
@@ -235,20 +221,21 @@ export default function App() {
     if (rawPB) pB = { x: rawPB.x * cw, y: rawPB.y * ch };
 
     const distance = Math.hypot(pB.x - pA.x, pB.y - pA.y);
-
     if (distanceTextRef.current)
       distanceTextRef.current.textContent = `${Math.floor(distance)} px`;
 
-    drawHandMarker(ctx, pA.x, pA.y, 'Hand A');
-    drawHandMarker(ctx, pB.x, pB.y, 'Hand B');
+    drawHandMarker(ctx, pA.x, pA.y, 'A');
+    drawHandMarker(ctx, pB.x, pB.y, 'B');
 
+    const isConnected =
+      distance < thresholdDistance && pA.x !== 0 && pB.x !== 0;
     const ratio = Math.min(distance / thresholdDistance, 1);
     const r = Math.floor(255 * ratio),
       g = Math.floor(255 * (1 - ratio));
 
     ctx.lineWidth = 15;
     ctx.lineCap = 'round';
-    if (distance < thresholdDistance && pA.x !== 0 && pB.x !== 0) {
+    if (isConnected) {
       ctx.strokeStyle = `rgb(${r}, ${g}, 200)`;
       ctx.shadowBlur = 15;
       ctx.shadowColor = ctx.strokeStyle;
@@ -272,11 +259,48 @@ export default function App() {
     ctx.setLineDash([]);
     ctx.shadowBlur = 0;
 
+    // --- ★オートスタートロジック ---
     if (isAIReadyRef.current) {
-      const isReady = distance < thresholdDistance && pA.x !== 0 && pB.x !== 0;
-      if (isReady !== canStartRef.current) {
-        canStartRef.current = isReady;
-        setCanStart(isReady);
+      if (isConnected) {
+        // バーが繋がった瞬間、開始時刻を記録
+        if (!autoStartStartTimeRef.current) {
+          autoStartStartTimeRef.current = Date.now();
+        }
+
+        const elapsed = Date.now() - autoStartStartTimeRef.current;
+        const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
+
+        // カウントダウン描画
+        if (remaining > 0) {
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+          ctx.fillRect(cw / 2 - 100, ch / 2 - 60, 200, 120);
+          ctx.fillStyle = '#00ffcc';
+          ctx.font = 'bold 60px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(remaining, cw / 2, ch / 2 + 20);
+          ctx.font = '20px sans-serif';
+          ctx.fillText('READY...', cw / 2, ch / 2 - 30);
+        }
+
+        // 3秒経過したらスタート
+        if (elapsed >= AUTO_START_DELAY) {
+          autoStartStartTimeRef.current = null; // リセット
+          handleStartGame();
+          return;
+        }
+
+        // Reactの状態も同期（ボタン表示用）
+        if (!canStartRef.current) {
+          canStartRef.current = true;
+          setCanStart(true);
+        }
+      } else {
+        // バーが切れたらタイマーリセット
+        autoStartStartTimeRef.current = null;
+        if (canStartRef.current) {
+          canStartRef.current = false;
+          setCanStart(false);
+        }
       }
     }
   };
@@ -297,12 +321,11 @@ export default function App() {
   };
 
   // ==========================================
-  // ゲームの開始・停止
+  // ゲーム本編 (Matter.js)
   // ==========================================
   const startGame = () => {
     engineRef.current = Matter.Engine.create();
     engineRef.current.gravity.y = 0;
-
     gameData.current = {
       ...gameData.current,
       isHoldingBall: true,
@@ -317,11 +340,9 @@ export default function App() {
       physicsPaddle: null,
       walls: [],
     };
-
     resizeCanvases();
     createBlocks();
     createBall();
-
     Matter.Events.on(engineRef.current, 'collisionStart', (e) => {
       if (gameData.current.gameState !== 'playing') return;
       e.pairs.forEach((pair) => {
@@ -329,7 +350,6 @@ export default function App() {
         if (pair.bodyB.label === 'block') handleBlockHit(pair.bodyB);
       });
     });
-
     gameLoop();
   };
 
@@ -347,21 +367,19 @@ export default function App() {
     gameData.current.walls.forEach((wall) =>
       Matter.Composite.remove(engineRef.current.world, wall),
     );
-
-    // ★変更：壁を「左・右・上」に配置（下を開放）
     gameData.current.walls = [
       Matter.Bodies.rectangle(-25, h / 2, 50, h, {
         isStatic: true,
         restitution: 1,
-      }), // 左
+      }),
       Matter.Bodies.rectangle(w + 25, h / 2, 50, h, {
         isStatic: true,
         restitution: 1,
-      }), // 右
+      }),
       Matter.Bodies.rectangle(w / 2, -25, w, 50, {
         isStatic: true,
         restitution: 1,
-      }), // 上
+      }),
     ];
     Matter.World.add(engineRef.current.world, gameData.current.walls);
   };
@@ -372,12 +390,11 @@ export default function App() {
     const rows = 5,
       cols = 10,
       padding = 10;
-    const w = (cw - padding * (cols + 1)) / cols;
-    const h = 40;
+    const w = (cw - padding * (cols + 1)) / cols,
+      h = 40;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         let x = padding + c * (w + padding) + w / 2;
-        // ★変更：画面の「上」の方にブロックを配置
         let y = 100 + r * (h + padding) + h / 2;
         let block = Matter.Bodies.rectangle(x, y, w, h, {
           isStatic: true,
@@ -415,7 +432,6 @@ export default function App() {
     gameData.current.blocks = gameData.current.blocks.filter(
       (b) => b !== blockBody,
     );
-
     gameData.current.respawnQueue.push({
       x: blockBody.position.x,
       y: blockBody.position.y,
@@ -443,10 +459,8 @@ export default function App() {
     const engine = engineRef.current;
     const ctx = gameCanvasRef.current?.getContext('2d');
     if (!ctx || !engine) return;
-
     const cw = window.innerWidth,
       ch = window.innerHeight;
-
     if (state.physicsPaddle) {
       Matter.Composite.remove(engine.world, state.physicsPaddle);
       state.physicsPaddle = null;
@@ -461,9 +475,8 @@ export default function App() {
         state.playerB.x - state.playerA.x,
         state.playerB.y - state.playerA.y,
       );
-      let cx = (state.playerA.x + state.playerB.x) / 2;
-      let cy = (state.playerA.y + state.playerB.y) / 2;
-
+      let cx = (state.playerA.x + state.playerB.x) / 2,
+        cy = (state.playerA.y + state.playerB.y) / 2;
       if (distance < thresholdDistance) {
         let angle = Math.atan2(
           state.playerB.y - state.playerA.y,
@@ -484,15 +497,12 @@ export default function App() {
         );
         Matter.World.add(engine.world, state.physicsPaddle);
       }
-
       if (state.ball && state.isHoldingBall) {
-        // ★変更：ボールをバーの「上」にホールドする
         Matter.Body.setPosition(state.ball, {
           x: cx,
           y: cy - PADDLE_THICKNESS - 10,
         });
         Matter.Body.setVelocity(state.ball, { x: 0, y: 0 });
-
         if (distance < thresholdDistance) {
           state.isReadyToDrop = true;
         } else if (distance >= thresholdDistance && state.isReadyToDrop) {
@@ -500,7 +510,6 @@ export default function App() {
           state.isReadyToDrop = false;
           let xDir = Math.random() > 0.5 ? 1 : -1;
           let xSpeed = BALL_SPEED * (0.2 + Math.random() * 0.2);
-          // ★変更：ボールを「上（マイナス方向）」に発射する
           Matter.Body.setVelocity(state.ball, {
             x: xSpeed * xDir,
             y: -BALL_SPEED,
@@ -534,9 +543,7 @@ export default function App() {
       }
       Matter.Engine.update(engine);
     }
-
     ctx.clearRect(0, 0, cw, ch);
-
     state.blocks.forEach((b) => {
       ctx.fillStyle = b.renderColor;
       ctx.beginPath();
@@ -553,14 +560,11 @@ export default function App() {
         b.vertices[2].y - b.vertices[0].y,
       );
     });
-
     if (state.ball && state.gameState === 'playing') {
       ctx.fillStyle = '#fff';
       ctx.beginPath();
       ctx.arc(state.ball.position.x, state.ball.position.y, 20, 0, 2 * Math.PI);
       ctx.fill();
-
-      // ★変更：画面の「下」に落ちたらミス（アウト）
       if (state.ball.position.y > ch + 50) {
         state.lives--;
         if (state.lives <= 0) {
@@ -577,7 +581,6 @@ export default function App() {
           state.isReadyToDrop = false;
         }
       }
-
       if (state.ball && !state.isHoldingBall) {
         const speed = Math.hypot(state.ball.velocity.x, state.ball.velocity.y);
         if (speed > 0)
@@ -587,7 +590,6 @@ export default function App() {
           });
       }
     }
-
     if (
       state.playerA.x !== 0 &&
       state.playerB.x !== 0 &&
@@ -600,7 +602,6 @@ export default function App() {
       const ratio = Math.min(distance / thresholdDistance, 1);
       const r = Math.floor(255 * ratio),
         g = Math.floor(255 * (1 - ratio));
-
       ctx.lineWidth = PADDLE_THICKNESS;
       ctx.lineCap = 'round';
       if (distance < thresholdDistance) {
@@ -619,7 +620,6 @@ export default function App() {
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.shadowBlur = 0;
-
       if (
         state.isHoldingBall &&
         state.isReadyToDrop &&
@@ -630,7 +630,6 @@ export default function App() {
         ctx.textAlign = 'center';
         ctx.shadowBlur = 5;
         ctx.shadowColor = '#000';
-        // ★変更：テキストがボールと被らないようにバーの少し下に表示
         ctx.fillText(
           '手を離して発射！',
           (state.playerA.x + state.playerB.x) / 2,
@@ -641,7 +640,6 @@ export default function App() {
       drawHandMarker(ctx, state.playerA.x, state.playerA.y, 'A');
       drawHandMarker(ctx, state.playerB.x, state.playerB.y, 'B');
     }
-
     if (state.gameState === 'playing') {
       ctx.fillStyle = '#fff';
       ctx.font = '30px sans-serif';
@@ -650,13 +648,11 @@ export default function App() {
       ctx.fillStyle = '#ffcc00';
       ctx.font = '24px sans-serif';
       ctx.textAlign = 'center';
-
       ctx.fillText(
         `HIGH SCORE: ${Math.max(parseInt(localStorage.getItem('breakout_highscore') || '0', 10), state.score)}`,
         cw / 2,
         40,
       );
-
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'right';
       ctx.font = 'bold 36px sans-serif';
@@ -709,7 +705,6 @@ export default function App() {
         muted
       ></video>
       {statusMsg && <div id="status-overlay">{statusMsg}</div>}
-
       <div
         id="setup-screen"
         style={{ display: currentMode === 'setup' ? 'flex' : 'none' }}
@@ -720,7 +715,6 @@ export default function App() {
           </div>
           <canvas id="setup-canvas" ref={setupCanvasRef}></canvas>
         </div>
-
         <div className="controls">
           <div className="control-group">
             <div className="switch-row">
@@ -735,7 +729,6 @@ export default function App() {
               <span>カメラON (AI起動)</span>
             </div>
           </div>
-
           <div className="control-group" style={{ flex: 1 }}>
             <label>
               バーが繋がる限界距離 (閾値): <span>{thresholdDistance}</span>px
@@ -752,7 +745,6 @@ export default function App() {
               --- px
             </div>
           </div>
-
           <div className="start-btn-container">
             <button
               id="start-btn"
@@ -764,15 +756,14 @@ export default function App() {
               }}
             >
               {canStart
-                ? '準備完了！ゲームスタート！'
+                ? '3秒キープでスタート！'
                 : isAIReadyState
-                  ? '2人で手を近づけてバーを繋ぐとスタート！'
+                  ? '2人で手を近づけて3秒待機！'
                   : 'AIを起動してください'}
             </button>
           </div>
         </div>
       </div>
-
       <div
         id="game-screen"
         style={{ display: currentMode === 'game' ? 'block' : 'none' }}
