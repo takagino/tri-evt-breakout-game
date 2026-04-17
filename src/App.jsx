@@ -2,13 +2,22 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Matter from 'matter-js';
 import './index.css';
 
-// --- ゲーム設定定数 ---
-const BALL_SPEED = 5;
-const PADDLE_THICKNESS = 30;
-const RESPAWN_TIME = 8000;
-const AUTO_START_DELAY = 3000;
+// ==========================================
+// --- ゲーム設定定数（★ここでバランス調整が可能です） ---
+// ==========================================
+const BALL_SPEED = 5; // ボールの基本速度
+const PADDLE_THICKNESS = 30; // バーの太さ
+const RESPAWN_TIME = 15000; // ブロックが復活するまでの時間（ミリ秒）
+const AUTO_START_DELAY = 3000; // バーを繋いでからスタートするまでの待機時間（ミリ秒）
 
-// ★追加：線分と点の距離を測る数学関数（アイテムとバーの当たり判定用）
+// --- アイテム出現確率設定 ---
+const ITEM_DROP_RATE = 0.1; // ブロックを壊した時にアイテムが落ちる全体確率 (0.2 = 20%)
+const PROB_LIFE = 0.1; // その中で LIFE が選ばれる確率 (0.10 = 10%)
+const PROB_GUARD = 0.45; // その中で GUARD が選ばれる確率 (0.45 = 45%)
+const PROB_LONG = 0.45; // その中で LONG が選ばれる確率 (0.45 = 45%)
+// ※ 合計 1.0 (100%) になるようにしてください。
+// ==========================================
+
 const dist2 = (v, w) => (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
 const distToSegmentSquared = (p, v, w) => {
   const l2 = dist2(v, w);
@@ -35,14 +44,12 @@ export default function App() {
   const setupCanvasRef = useRef(null);
   const bgCanvasRef = useRef(null);
   const gameCanvasRef = useRef(null);
-  const setupViewRef = useRef(null);
   const distanceTextRef = useRef(null);
 
   const isAIReadyRef = useRef(false);
   const canStartRef = useRef(false);
   const autoStartStartTimeRef = useRef(null);
 
-  // AIとゲーム用のRef
   const engineRef = useRef(null);
   const renderLoopIdRef = useRef(null);
   const handsRef = useRef(null);
@@ -52,7 +59,7 @@ export default function App() {
     playerA: { x: 0, y: 0 },
     playerB: { x: 0, y: 0 },
     isHoldingBall: true,
-    isReadyToDrop: false,
+    launchTime: 0,
     lives: 3,
     score: 0,
     blocks: [],
@@ -61,12 +68,15 @@ export default function App() {
     respawnQueue: [],
     gameState: 'playing',
     isNewRecord: false,
-    // ★追加：アイテム管理用データ
     items: [],
-    isSlowMode: false,
-    slowTimer: 0,
+    isGuardMode: false,
+    guardTimer: 0,
+    guardPaddle: null,
+    guardVx: 6,
     isLongBar: false,
     longBarTimer: 0,
+    lastPaddleY: 0,
+    paddleVy: 0,
   });
 
   const resizeCanvases = useCallback(() => {
@@ -96,9 +106,6 @@ export default function App() {
     };
   }, [resizeCanvases, currentMode]);
 
-  // ==========================================
-  // AI (MediaPipe Hands) 初期化と座標補正
-  // ==========================================
   useEffect(() => {
     const hands = new window.Hands({
       locateFile: (file) =>
@@ -172,9 +179,6 @@ export default function App() {
     };
   }, [isCameraOn, currentMode, thresholdDistance]);
 
-  // ==========================================
-  // ★先生のソースコードと全く同じ、最も安定するカメラ起動方式
-  // ==========================================
   useEffect(() => {
     if (isCameraOn) {
       setStatusMsg('カメラ・AIを起動中...');
@@ -254,9 +258,9 @@ export default function App() {
     const r = Math.floor(255 * ratio),
       g = Math.floor(255 * (1 - ratio));
 
-    ctx.lineWidth = 15;
     ctx.lineCap = 'round';
     if (isConnected) {
+      ctx.lineWidth = 15;
       ctx.strokeStyle = `rgb(${r}, ${g}, 200)`;
       ctx.shadowBlur = 15;
       ctx.shadowColor = ctx.strokeStyle;
@@ -264,6 +268,7 @@ export default function App() {
       if (distanceTextRef.current)
         distanceTextRef.current.style.color = '#00ffcc';
     } else {
+      ctx.lineWidth = 5;
       ctx.strokeStyle = 'rgba(255, 50, 50, 0.5)';
       ctx.shadowBlur = 0;
       ctx.setLineDash([10, 20]);
@@ -332,9 +337,6 @@ export default function App() {
     ctx.fillText(label, x, y + 4);
   };
 
-  // ==========================================
-  // ゲーム本編 (Matter.js)
-  // ==========================================
   const startGame = () => {
     engineRef.current = Matter.Engine.create();
     engineRef.current.gravity.y = 0;
@@ -344,7 +346,7 @@ export default function App() {
     gameData.current = {
       ...gameData.current,
       isHoldingBall: true,
-      isReadyToDrop: false,
+      launchTime: 0,
       lives: 3,
       score: 0,
       isNewRecord: false,
@@ -354,12 +356,15 @@ export default function App() {
       ball: null,
       physicsPaddle: null,
       walls: [],
-      // アイテム用ステータス初期化
       items: [],
-      isSlowMode: false,
-      slowTimer: 0,
+      isGuardMode: false,
+      guardTimer: 0,
+      guardPaddle: null,
+      guardVx: 6,
       isLongBar: false,
       longBarTimer: 0,
+      lastPaddleY: 0,
+      paddleVy: 0,
     };
     resizeCanvases();
     createBlocks();
@@ -367,10 +372,39 @@ export default function App() {
     Matter.Events.on(engineRef.current, 'collisionStart', (e) => {
       if (gameData.current.gameState !== 'playing') return;
       e.pairs.forEach((pair) => {
-        if (pair.bodyA.label === 'block') handleBlockHit(pair.bodyA);
-        if (pair.bodyB.label === 'block') handleBlockHit(pair.bodyB);
+        const bodyA = pair.bodyA;
+        const bodyB = pair.bodyB;
+
+        if (bodyA.label === 'block') bodyA.isHit = true;
+        if (bodyB.label === 'block') bodyB.isHit = true;
+
+        const ball =
+          bodyA.label === 'ball'
+            ? bodyA
+            : bodyB.label === 'ball'
+              ? bodyB
+              : null;
+        const paddle =
+          bodyA.label === 'paddle'
+            ? bodyA
+            : bodyB.label === 'paddle'
+              ? bodyB
+              : null;
+
+        if (ball && paddle && !gameData.current.isHoldingBall) {
+          if (ball.velocity.y > 0) {
+            let newVy = -ball.velocity.y;
+            if (gameData.current.paddleVy < -1) {
+              newVy += gameData.current.paddleVy * 0.5;
+            }
+            let hitOffset = ball.position.x - paddle.position.x;
+            let newVx = ball.velocity.x + hitOffset * 0.05;
+            Matter.Body.setVelocity(ball, { x: newVx, y: newVy });
+          }
+        }
       });
     });
+
     gameLoop();
   };
 
@@ -394,14 +428,17 @@ export default function App() {
       Matter.Bodies.rectangle(-25, h / 2, 50, h, {
         isStatic: true,
         restitution: 1,
+        friction: 0,
       }),
       Matter.Bodies.rectangle(w + 25, h / 2, 50, h, {
         isStatic: true,
         restitution: 1,
+        friction: 0,
       }),
       Matter.Bodies.rectangle(w / 2, -25, w, 50, {
         isStatic: true,
         restitution: 1,
+        friction: 0,
       }),
     ];
     Matter.World.add(engineRef.current.world, gameData.current.walls);
@@ -418,13 +455,17 @@ export default function App() {
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         let x = padding + c * (w + padding) + w / 2;
-        let y = 50 + r * (h + padding) + h / 2;
+        // ブロックを少し下に配置し、天井にめり込む隙間をなくす
+        let y = 60 + r * (h + padding) + h / 2;
+
         let block = Matter.Bodies.rectangle(x, y, w, h, {
           isStatic: true,
           label: 'block',
           renderColor: `hsl(${(r * 40 + c * 20) % 360}, 80%, 50%)`,
           customW: w,
           customH: h,
+          friction: 0,
+          restitution: 1,
         });
         gameData.current.blocks.push(block);
       }
@@ -451,10 +492,17 @@ export default function App() {
       (b) => b !== blockBody,
     );
 
-    // ★追加：アイテムスポーン判定 (20%)
-    if (Math.random() < 0.2) {
-      const types = ['LIFE', 'SLOW', 'LONG'];
-      const type = types[Math.floor(Math.random() * types.length)];
+    if (Math.random() < ITEM_DROP_RATE) {
+      const rand = Math.random();
+      let type = 'GUARD';
+      if (rand < PROB_LIFE) {
+        type = 'LIFE';
+      } else if (rand < PROB_LIFE + PROB_GUARD) {
+        type = 'GUARD';
+      } else {
+        type = 'LONG';
+      }
+
       gameData.current.items.push({
         x: blockBody.position.x,
         y: blockBody.position.y,
@@ -497,11 +545,12 @@ export default function App() {
       ch = window.innerHeight;
     const now = Date.now();
 
-    // ★追加：アイテム効果のタイマー管理
-    if (state.isSlowMode && now > state.slowTimer) state.isSlowMode = false;
+    if (state.isGuardMode && now > state.guardTimer) {
+      state.isGuardMode = false;
+    }
     if (state.isLongBar && now > state.longBarTimer) state.isLongBar = false;
 
-    const activeBallSpeed = state.isSlowMode ? BALL_SPEED * 0.5 : BALL_SPEED;
+    const activeBallSpeed = BALL_SPEED;
     const activeThreshold = state.isLongBar
       ? thresholdDistance * 1.5
       : thresholdDistance;
@@ -509,6 +558,42 @@ export default function App() {
     if (state.physicsPaddle) {
       Matter.Composite.remove(engine.world, state.physicsPaddle);
       state.physicsPaddle = null;
+    }
+
+    if (state.gameState === 'playing') {
+      if (state.isGuardMode) {
+        const guardWidth = cw * 0.4;
+        if (!state.guardPaddle) {
+          state.guardPaddle = Matter.Bodies.rectangle(
+            cw / 2,
+            ch - 20,
+            guardWidth,
+            20,
+            {
+              isStatic: true,
+              restitution: 1.1,
+              friction: 0,
+              label: 'guard',
+            },
+          );
+          Matter.World.add(engine.world, state.guardPaddle);
+          state.guardVx = 6;
+        } else {
+          let gx = state.guardPaddle.position.x + state.guardVx;
+          if (gx - guardWidth / 2 < 0) {
+            gx = guardWidth / 2;
+            state.guardVx *= -1;
+          }
+          if (gx + guardWidth / 2 > cw) {
+            gx = cw - guardWidth / 2;
+            state.guardVx *= -1;
+          }
+          Matter.Body.setPosition(state.guardPaddle, { x: gx, y: ch - 20 });
+        }
+      } else if (state.guardPaddle) {
+        Matter.Composite.remove(engine.world, state.guardPaddle);
+        state.guardPaddle = null;
+      }
     }
 
     if (
@@ -522,6 +607,11 @@ export default function App() {
       );
       let cx = (state.playerA.x + state.playerB.x) / 2,
         cy = (state.playerA.y + state.playerB.y) / 2;
+
+      if (state.lastPaddleY !== 0) {
+        state.paddleVy = cy - state.lastPaddleY;
+      }
+      state.lastPaddleY = cy;
 
       if (distance < activeThreshold) {
         let angle = Math.atan2(
@@ -539,6 +629,7 @@ export default function App() {
             chamfer: { radius: 10 },
             restitution: 1.1,
             friction: 0,
+            label: 'paddle',
           },
         );
         Matter.World.add(engine.world, state.physicsPaddle);
@@ -546,7 +637,7 @@ export default function App() {
         if (!state.ball) {
           createBall(cx, cy - PADDLE_THICKNESS - 10);
           state.isHoldingBall = true;
-          state.isReadyToDrop = true;
+          state.launchTime = now + 3000;
         }
       }
 
@@ -556,11 +647,11 @@ export default function App() {
             x: cx,
             y: cy - PADDLE_THICKNESS - 10,
           });
-          Matter.Body.setVelocity(state.ball, { x: 0, y: 0 });
-          state.isReadyToDrop = true;
-        } else if (distance >= activeThreshold && state.isReadyToDrop) {
+        }
+        Matter.Body.setVelocity(state.ball, { x: 0, y: 0 });
+
+        if (now >= state.launchTime) {
           state.isHoldingBall = false;
-          state.isReadyToDrop = false;
           let xDir = Math.random() > 0.5 ? 1 : -1;
           let xSpeed = activeBallSpeed * (0.2 + Math.random() * 0.2);
           Matter.Body.setVelocity(state.ball, {
@@ -586,6 +677,8 @@ export default function App() {
               renderColor: info.color,
               customW: info.w,
               customH: info.h,
+              friction: 0,
+              restitution: 1,
             },
           );
           state.blocks.push(newBlock);
@@ -593,7 +686,14 @@ export default function App() {
           state.respawnQueue.splice(i, 1);
         }
       }
+
       Matter.Engine.update(engine);
+
+      for (let i = state.blocks.length - 1; i >= 0; i--) {
+        if (state.blocks[i].isHit) {
+          handleBlockHit(state.blocks[i]);
+        }
+      }
     }
 
     ctx.clearRect(0, 0, cw, ch);
@@ -615,7 +715,6 @@ export default function App() {
       );
     });
 
-    // --- ★追加：アイテムの移動、描画、当たり判定 ---
     if (state.gameState === 'playing') {
       for (let i = state.items.length - 1; i >= 0; i--) {
         let item = state.items[i];
@@ -624,7 +723,7 @@ export default function App() {
         ctx.fillStyle =
           item.type === 'LIFE'
             ? '#ff3366'
-            : item.type === 'SLOW'
+            : item.type === 'GUARD'
               ? '#33ccff'
               : '#ccff33';
         ctx.beginPath();
@@ -639,7 +738,7 @@ export default function App() {
         ctx.font = 'bold 14px sans-serif';
         ctx.textAlign = 'center';
         let icon =
-          item.type === 'LIFE' ? '💖' : item.type === 'SLOW' ? '🐢' : '↔️';
+          item.type === 'LIFE' ? '💖' : item.type === 'GUARD' ? '🛡️' : '↔️';
         ctx.fillText(icon, item.x, item.y + 5);
 
         let isHit = false;
@@ -654,9 +753,9 @@ export default function App() {
 
         if (isHit) {
           if (item.type === 'LIFE') state.lives++;
-          else if (item.type === 'SLOW') {
-            state.isSlowMode = true;
-            state.slowTimer = now + 10000;
+          else if (item.type === 'GUARD') {
+            state.isGuardMode = true;
+            state.guardTimer = now + 10000;
           } else if (item.type === 'LONG') {
             state.isLongBar = true;
             state.longBarTimer = now + 10000;
@@ -670,6 +769,20 @@ export default function App() {
     }
 
     if (state.ball && state.gameState === 'playing') {
+      if (state.isGuardMode && state.guardPaddle) {
+        const gw = cw * 0.4;
+        ctx.fillStyle = 'rgba(0, 255, 204, 0.8)';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#00ffcc';
+        ctx.fillRect(
+          state.guardPaddle.position.x - gw / 2,
+          state.guardPaddle.position.y - 10,
+          gw,
+          20,
+        );
+        ctx.shadowBlur = 0;
+      }
+
       ctx.fillStyle = '#fff';
       ctx.beginPath();
       ctx.arc(state.ball.position.x, state.ball.position.y, 20, 0, 2 * Math.PI);
@@ -690,18 +803,31 @@ export default function App() {
           Matter.Composite.remove(engine.world, state.ball);
           state.ball = null;
           state.isHoldingBall = true;
-          state.isReadyToDrop = false;
         }
       }
 
       if (state.ball && !state.isHoldingBall) {
         let vx = state.ball.velocity.x;
         let vy = state.ball.velocity.y;
+        let px = state.ball.position.x;
+        let py = state.ball.position.y;
 
-        // ★追加：水平無限ループ回避処理
-        if (Math.abs(vy) < 1.5) {
-          vy = vy < 0 ? -1.5 : 1.5;
+        // ==========================================
+        // ★修正：壁での大袈裟な反射 ＆ 真横ループの完全排除
+        // ==========================================
+        // 1. 壁や天井に近づいたら、強制的に「逆方向＋少し強めの力」で弾き返す
+        if (px < 30) vx = Math.abs(vx) + 2; // 左壁 -> 右へ
+        if (px > cw - 30) vx = -Math.abs(vx) - 2; // 右壁 -> 左へ
+        if (py < 30) vy = Math.abs(vy) + 2; // 天井 -> 絶対に下へ
+
+        // 2. 進行方向が「真横」になるのを完全に防ぐ（最低でも約22度の角度を保証）
+        if (Math.abs(vy) < Math.abs(vx) * 0.4) {
+          vy = (vy >= 0 ? 1 : -1) * Math.abs(vx) * 0.4;
         }
+
+        // 3. スピードがゼロに近づくのを防ぐ
+        if (Math.abs(vy) < 1.5) vy = vy >= 0 ? 1.5 : -1.5;
+        if (Math.abs(vx) < 1.5) vx = vx >= 0 ? 1.5 : -1.5;
 
         const speed = Math.hypot(vx, vy);
         if (speed > 0)
@@ -727,10 +853,9 @@ export default function App() {
       const r = Math.floor(255 * ratio),
         g = Math.floor(255 * (1 - ratio));
 
-      ctx.lineWidth = PADDLE_THICKNESS;
       ctx.lineCap = 'round';
       if (distance < activeThreshold) {
-        // ★追加：LONGアイテム中は黄金に輝く
+        ctx.lineWidth = PADDLE_THICKNESS;
         if (state.isLongBar) {
           ctx.strokeStyle = `rgb(255, 200, 50)`;
         } else {
@@ -740,6 +865,7 @@ export default function App() {
         ctx.shadowColor = ctx.strokeStyle;
         ctx.setLineDash([]);
       } else {
+        ctx.lineWidth = 5;
         ctx.strokeStyle = 'rgba(255, 50, 50, 0.4)';
         ctx.shadowBlur = 0;
         ctx.setLineDash([10, 20]);
@@ -759,18 +885,21 @@ export default function App() {
         ctx.shadowColor = '#000';
         ctx.fillText('手を近づけてボールを出す！', cx, cy - 40);
         ctx.shadowBlur = 0;
-      } else if (
-        state.isHoldingBall &&
-        state.isReadyToDrop &&
-        distance < activeThreshold
-      ) {
-        ctx.fillStyle = '#fff';
-        ctx.font = '24px bold sans-serif';
-        ctx.textAlign = 'center';
-        ctx.shadowBlur = 5;
-        ctx.shadowColor = '#000';
-        ctx.fillText('手を離して発射！', cx, cy - 40);
-        ctx.shadowBlur = 0;
+      } else if (state.ball && state.isHoldingBall) {
+        let remaining = Math.ceil((state.launchTime - now) / 1000);
+        if (remaining > 0) {
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 28px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = '#000';
+          ctx.fillText(
+            `${remaining}秒後に発射！`,
+            state.ball.position.x,
+            state.ball.position.y - 30,
+          );
+          ctx.shadowBlur = 0;
+        }
       }
 
       drawHandMarker(ctx, state.playerA.x, state.playerA.y, 'A');
@@ -806,11 +935,10 @@ export default function App() {
       ctx.font = 'bold 36px sans-serif';
       ctx.fillText(`SCORE: ${state.score}`, cw - 30, 60);
 
-      // --- ★追加：アイテム効果の発動中表示（画面下部） ---
       let effectText = [];
-      if (state.isSlowMode)
+      if (state.isGuardMode)
         effectText.push(
-          `🐢 スロー: 残り ${Math.ceil((state.slowTimer - now) / 1000)}秒`,
+          `🛡️ ガード: 残り ${Math.ceil((state.guardTimer - now) / 1000)}秒`,
         );
       if (state.isLongBar)
         effectText.push(
@@ -858,14 +986,16 @@ export default function App() {
         const ratio = Math.min(distance / thresholdDistance, 1);
         const r = Math.floor(255 * ratio),
           g = Math.floor(255 * (1 - ratio));
-        ctx.lineWidth = 15;
+
         ctx.lineCap = 'round';
         if (distance < thresholdDistance) {
+          ctx.lineWidth = 15;
           ctx.strokeStyle = `rgb(${r}, ${g}, 200)`;
           ctx.shadowBlur = 15;
           ctx.shadowColor = ctx.strokeStyle;
           ctx.setLineDash([]);
         } else {
+          ctx.lineWidth = 5;
           ctx.strokeStyle = 'rgba(255, 50, 50, 0.4)';
           ctx.shadowBlur = 0;
           ctx.setLineDash([10, 20]);
@@ -895,7 +1025,6 @@ export default function App() {
               ch / 2 + 150,
             );
           }
-
           if (elapsed >= AUTO_START_DELAY) {
             autoStartStartTimeRef.current = null;
             handleBackToSetup();
@@ -964,8 +1093,135 @@ export default function App() {
             left: 0,
           }}
         ></canvas>
-        <div id="setup-highscore">
-          本日のハイスコア: <span>{highScore}</span>
+
+        <div
+          style={{
+            position: 'absolute',
+            top: '20px',
+            left: '20px',
+            zIndex: 10,
+            width: '90%',
+            maxWidth: '450px',
+            maxHeight: 'calc(100vh - 120px)',
+            overflowY: 'auto',
+          }}
+        >
+          <div
+            style={{
+              background: 'rgba(0, 0, 0, 0.7)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: '15px',
+              backdropFilter: 'blur(8px)',
+              padding: '20px',
+              color: '#fff',
+              fontSize: '14px',
+              lineHeight: '1.6',
+              boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
+            }}
+          >
+            <h2
+              style={{
+                margin: '0 0 15px 0',
+                fontSize: '20px',
+                color: '#00ffcc',
+                borderBottom: '1px solid rgba(255,255,255,0.3)',
+                paddingBottom: '8px',
+              }}
+            >
+              🎮 遊び方 ＆ ルール
+            </h2>
+
+            <h3
+              style={{
+                margin: '15px 0 5px 0',
+                fontSize: '16px',
+                color: '#ffcc00',
+              }}
+            >
+              【基本ルール】
+            </h3>
+            <ul style={{ margin: 0, paddingLeft: '20px' }}>
+              <li>2人1組で協力するブロック崩しゲームです。</li>
+              <li>
+                2人の「手と手」を近づけると、ボールを跳ね返すバーが出現します。
+              </li>
+              <li>
+                腕を下げ、手のひらをしっかり画面に向けると認識しやすくなります。
+                <br />
+                <span style={{ fontSize: '12px', color: '#aaa' }}>
+                  ※使わない方の手は画面に映らないよう後ろに隠してください。
+                </span>
+              </li>
+            </ul>
+
+            <h3
+              style={{
+                margin: '15px 0 5px 0',
+                fontSize: '16px',
+                color: '#ffcc00',
+              }}
+            >
+              【ゲームの進め方】
+            </h3>
+            <ul style={{ margin: 0, paddingLeft: '20px' }}>
+              <li>この画面でバーを作って「3秒キープ」するとゲームスタート！</li>
+              <li>
+                ボールは、バーの上に出現してから「3秒後」に自動で発射されます。
+              </li>
+              <li>
+                下に落とさないよう、2人の息を合わせてボールを跳ね返しましょう！
+              </li>
+              <li>ブロックを壊すと100点！時間経過でどんどん復活します。</li>
+            </ul>
+
+            <h3
+              style={{
+                margin: '15px 0 5px 0',
+                fontSize: '16px',
+                color: '#ffcc00',
+              }}
+            >
+              【アイテム（ブロックから確率で出現）】
+            </h3>
+            <ul
+              style={{
+                marginTop: '5px',
+                paddingLeft: '10px',
+                listStyleType: 'none',
+                background: 'rgba(255,255,255,0.1)',
+                padding: '10px',
+                borderRadius: '8px',
+              }}
+            >
+              <li style={{ marginBottom: '5px' }}>
+                💖 <strong style={{ color: '#ff3366' }}>LIFE</strong> :
+                ライフが1回復（超レア！）
+              </li>
+              <li style={{ marginBottom: '5px' }}>
+                🛡️ <strong style={{ color: '#33ccff' }}>GUARD</strong> :
+                10秒間、左右に動くお助けバリアが出現
+              </li>
+              <li>
+                ↔️ <strong style={{ color: '#ccff33' }}>LONG</strong> :
+                10秒間、バーが切れにくくなる
+              </li>
+            </ul>
+
+            <div
+              style={{
+                marginTop: '20px',
+                padding: '10px',
+                textAlign: 'center',
+                background: 'linear-gradient(45deg, #ffcc00, #ff5500)',
+                borderRadius: '8px',
+                color: '#000',
+                fontWeight: 'bold',
+                fontSize: '18px',
+              }}
+            >
+              🏆 現在のハイスコア: {highScore}
+            </div>
+          </div>
         </div>
 
         <div
