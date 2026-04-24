@@ -5,6 +5,9 @@ import {
   PADDLE_THICKNESS,
   RESPAWN_TIME,
   AUTO_START_DELAY,
+  RETURN_SETUP_DELAY,
+  BALL_LAUNCH_DELAY,
+  ITEM_EFFECT_DURATION,
   ITEM_DROP_RATE,
   PROB_LIFE,
   PROB_GUARD,
@@ -281,14 +284,10 @@ export default function useGameLogic() {
         const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
 
         if (remaining > 0) {
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-          ctx.fillRect(cw / 2 - 100, ch / 2 - 60, 200, 120);
           ctx.fillStyle = '#00ffcc';
-          ctx.font = 'bold 60px sans-serif';
+          ctx.font = 'bold 240px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText(remaining, cw / 2, ch / 2 + 20);
-          ctx.font = '20px sans-serif';
-          ctx.fillText('READY...', cw / 2, ch / 2 - 30);
+          ctx.fillText(remaining, cw / 2, ch / 2);
         }
         if (elapsed >= AUTO_START_DELAY) {
           autoStartStartTimeRef.current = null;
@@ -647,7 +646,7 @@ export default function useGameLogic() {
         if (!state.ball) {
           createBall(cx, cy - PADDLE_THICKNESS - 10);
           state.isHoldingBall = true;
-          state.launchTime = now + 3000;
+          state.launchTime = now + BALL_LAUNCH_DELAY;
         }
       }
 
@@ -765,10 +764,10 @@ export default function useGameLogic() {
           if (item.type === 'LIFE') state.lives++;
           else if (item.type === 'GUARD') {
             state.isGuardMode = true;
-            state.guardTimer = now + 10000;
+            state.guardTimer = now + ITEM_EFFECT_DURATION;
           } else if (item.type === 'LONG') {
             state.isLongBar = true;
-            state.longBarTimer = now + 10000;
+            state.longBarTimer = now + ITEM_EFFECT_DURATION;
           }
           state.items.splice(i, 1);
           continue;
@@ -1025,7 +1024,7 @@ export default function useGameLogic() {
           if (!autoStartStartTimeRef.current)
             autoStartStartTimeRef.current = Date.now();
           const elapsed = Date.now() - autoStartStartTimeRef.current;
-          const remaining = Math.ceil((AUTO_START_DELAY - elapsed) / 1000);
+          const remaining = Math.ceil((RETURN_SETUP_DELAY - elapsed) / 1000);
 
           if (remaining > 0) {
             ctx.fillStyle = '#00ffcc';
@@ -1036,7 +1035,7 @@ export default function useGameLogic() {
               ch / 2 + 150,
             );
           }
-          if (elapsed >= AUTO_START_DELAY) {
+          if (elapsed >= RETURN_SETUP_DELAY) {
             autoStartStartTimeRef.current = null;
             handleBackToSetup();
             return;
@@ -1046,7 +1045,7 @@ export default function useGameLogic() {
           ctx.fillStyle = '#fff';
           ctx.font = '24px sans-serif';
           ctx.fillText(
-            '2人で手を近づけて3秒キープで最初の画面に戻るよ',
+            `2人で手を近づけて${RETURN_SETUP_DELAY / 1000}秒キープで最初の画面に戻るよ`,
             cw / 2,
             ch / 2 + 150,
           );

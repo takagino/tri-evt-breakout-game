@@ -1,4 +1,5 @@
 import React from 'react';
+import { AUTO_START_DELAY } from '../constants/game';
 
 export default function ControlPanel({
   isCameraOn,
@@ -110,7 +111,7 @@ export default function ControlPanel({
         }}
       >
         {canStart
-          ? '3秒キープで開始！'
+          ? `${AUTO_START_DELAY / 1000}秒キープで開始！`
           : isAIReadyState
             ? '手を近づけて待機'
             : 'AI起動待ち'}
