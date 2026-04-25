@@ -1,7 +1,7 @@
 // ==========================================
 // --- ゲーム設定定数（★ここでバランス調整が可能です） ---
 // ==========================================
-export const BALL_SPEED = 6; // ボールの基本速度
+export const BALL_SPEED = 7; // ボールの基本速度
 export const PADDLE_THICKNESS = 20; // バーの太さ
 export const RESPAWN_TIME = 45000; // ブロックが復活するまでの時間（ミリ秒）
 export const AUTO_START_DELAY = 5000; // バーを繋いでからスタートするまでの待機時間（ミリ秒）
